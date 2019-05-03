@@ -33,6 +33,9 @@ const LibP2PVersion = "ipfs/0.1.0"
 
 var ClientVersion = "go-libp2p/3.3.4"
 
+// transientTTL is a short ttl for invalidated previously connected addrs
+const transientTTL = 10 * time.Second
+
 // IDService is a structure that implements ProtocolIdentify.
 // It is a trivial service that gives the other peer some
 // useful information about the local peer. A sort of hello.
@@ -44,6 +47,8 @@ var ClientVersion = "go-libp2p/3.3.4"
 type IDService struct {
 	Host host.Host
 
+	ctx context.Context
+
 	// connections undergoing identification
 	// for wait purposes
 	currid map[inet.Conn]chan struct{}
@@ -53,15 +58,17 @@ type IDService struct {
 
 	// our own observed addresses.
 	// TODO: instead of expiring, remove these when we disconnect
-	observedAddrs ObservedAddrSet
+	observedAddrs *ObservedAddrSet
 }
 
 // NewIDService constructs a new *IDService and activates it by
 // attaching its stream handler to the given host.Host.
-func NewIDService(h host.Host) *IDService {
+func NewIDService(ctx context.Context, h host.Host) *IDService {
 	s := &IDService{
-		Host:   h,
-		currid: make(map[inet.Conn]chan struct{}),
+		Host:          h,
+		ctx:           ctx,
+		currid:        make(map[inet.Conn]chan struct{}),
+		observedAddrs: NewObservedAddrSet(ctx),
 	}
 	h.SetStreamHandler(ID, s.requestHandler)
 	h.SetStreamHandler(IDPush, s.pushHandler)
@@ -152,19 +159,42 @@ func (ids *IDService) pushHandler(s inet.Stream) {
 }
 
 func (ids *IDService) Push() {
+	var wg sync.WaitGroup
+
+	ctx, cancel := context.WithTimeout(ids.ctx, 30*time.Second)
+	ctx = inet.WithNoDial(ctx, "identify push")
+
 	for _, p := range ids.Host.Network().Peers() {
+		wg.Add(1)
 		go func(p peer.ID) {
-			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			defer cancel()
+			defer wg.Done()
+
 			s, err := ids.Host.NewStream(ctx, p, IDPush)
 			if err != nil {
-				log.Debugf("error opening push stream: %s", err.Error())
+				log.Debugf("error opening push stream to %s: %s", p, err.Error())
 				return
 			}
 
-			ids.requestHandler(s)
+			rch := make(chan struct{}, 1)
+			go func() {
+				ids.requestHandler(s)
+				rch <- struct{}{}
+			}()
+
+			select {
+			case <-rch:
+			case <-ctx.Done():
+				// this is taking too long, abort!
+				s.Reset()
+			}
 		}(p)
 	}
+
+	// this supervisory goroutine is necessary to cancel the context
+	go func() {
+		wg.Wait()
+		cancel()
+	}()
 }
 
 func (ids *IDService) populateMessage(mes *pb.Identify, c inet.Conn) {
@@ -238,19 +268,25 @@ func (ids *IDService) consumeMessage(mes *pb.Identify, c inet.Conn) {
 		lmaddrs = append(lmaddrs, maddr)
 	}
 
-	// if the address reported by the connection roughly matches their annoucned
-	// listener addresses, its likely to be an external NAT address
-	if HasConsistentTransport(c.RemoteMultiaddr(), lmaddrs) {
-		lmaddrs = append(lmaddrs, c.RemoteMultiaddr())
-	}
+	// NOTE: Do not add `c.RemoteMultiaddr()` to the peerstore if the remote
+	// peer doesn't tell us to do so. Otherwise, we'll advertise it.
+	//
+	// This can cause an "addr-splosion" issue where the network will slowly
+	// gossip and collect observed but unadvertised addresses. Given a NAT
+	// that picks random source ports, this can cause DHT nodes to collect
+	// many undialable addresses for other peers.
 
 	// Extend the TTLs on the known (probably) good addresses.
 	// Taking the lock ensures that we don't concurrently process a disconnect.
 	ids.addrMu.Lock()
 	switch ids.Host.Network().Connectedness(p) {
 	case inet.Connected:
+		// invalidate previous addrs -- we use a transient ttl instead of 0 to ensure there
+		// is no period of having no good addrs whatsoever
+		ids.Host.Peerstore().UpdateAddrs(p, pstore.ConnectedAddrTTL, transientTTL)
 		ids.Host.Peerstore().AddAddrs(p, lmaddrs, pstore.ConnectedAddrTTL)
 	default:
+		ids.Host.Peerstore().UpdateAddrs(p, pstore.ConnectedAddrTTL, transientTTL)
 		ids.Host.Peerstore().AddAddrs(p, lmaddrs, pstore.RecentlyConnectedAddrTTL)
 	}
 	ids.addrMu.Unlock()
@@ -415,6 +451,11 @@ func (ids *IDService) consumeObservedAddress(observed []byte, c inet.Conn) {
 	log.Debugf("identify identifying observed multiaddr: %s %s", c.LocalMultiaddr(), ifaceaddrs)
 	if !addrInAddrs(c.LocalMultiaddr(), ifaceaddrs) && !addrInAddrs(c.LocalMultiaddr(), ids.Host.Network().ListenAddresses()) {
 		// not in our list
+		return
+	}
+
+	if !HasConsistentTransport(maddr, ids.Host.Addrs()) {
+		log.Debugf("ignoring observed multiaddr that doesn't match the transports of any addresses we're announcing", c.RemoteMultiaddr())
 		return
 	}
 

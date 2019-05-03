@@ -10,6 +10,7 @@
   <a href="http://libp2p.io/"><img src="https://img.shields.io/badge/project-libp2p-yellow.svg?style=flat-square" /></a>
   <a href="http://webchat.freenode.net/?channels=%23libp2p"><img src="https://img.shields.io/badge/freenode-%23libp2p-yellow.svg?style=flat-square" /></a>
   <a href="https://waffle.io/libp2p/libp2p"><img src="https://img.shields.io/badge/pm-waffle-yellow.svg?style=flat-square" /></a>
+  <a href="https://discuss.libp2p.io"><img src="https://img.shields.io/discourse/https/discuss.libp2p.io/posts.svg"/></a>
 </p>
 
 <p align="center">
@@ -30,16 +31,15 @@
 # Table of Contents
 
 - [Background](#background)
-- [Bundles](#bundles)
 - [Usage](#usage)
-  - [Install](#install)
   - [API](#api)
   - [Examples](#examples)
 - [Development](#development)
+  - [Using the libp2p Workspace](#using-the-libp2p-workspace)
+  - [About gx](#about-gx)
   - [Tests](#tests)
   - [Packages](#packages)
 - [Contribute](#contribute)
-- [License](#license)
 
 ## Background
 
@@ -49,6 +49,8 @@ libp2p is the product of a long, and arduous quest of understanding -- a deep di
 >
 > We will be writing a set of docs, posts, tutorials, and talks to explain what p2p is, why it is tremendously useful, and how it can help your existing and new projects. But in the meantime, check out
 >
+> - [**Our developing collection of docs**](https://docs.libp2p.io)
+> - [**Our community discussion forums**](https://discuss.libp2p.io)
 > - [**The libp2p Specification**](https://github.com/libp2p/specs)
 > - [**go-libp2p implementation**](https://github.com/libp2p/go-libp2p)
 > - [**js-libp2p implementation**](https://github.com/libp2p/js-libp2p)
@@ -80,29 +82,33 @@ Examples can be found in the [examples repo](https://github.com/libp2p/go-libp2p
 
 ## Development
 
-### Dependencies
+### Using the libp2p Workspace
 
-While developing, you need to use [gx to install and link your dependencies](https://github.com/whyrusleeping/gx#dependencies), to do that, run:
+While developing, you may need to make changes to several modules at once, or you may want changes made locally in one module to be available for import by another.
 
-```sh
-> make deps
-```
+The [go libp2p workspace](https://github.com/libp2p/workspace-go-libp2p) provides a developer-oriented view of the modules that comprise go-libp2p. 
 
-Before commiting and pushing to Github, make sure to rewind the gx'ify of dependencies. You can do that with:
+Using the tooling in the workspace repository, you can checkout all of go-libp2p's module repos and enter "local mode", which adds [replace directives](https://github.com/golang/go/wiki/Modules#gomod) to the go.mod files in each local working copy. When you build locally, the libp2p depdendencies will be resolved from your local working copies.
 
-```sh
-> make publish
-```
+Once you've committed your changes, you can switch back to "remote mode", which removes the replace directives and pulls imports from the main go module cache.
+
+See the [workspace repo](https://github.com/libp2p/workspace-go-libp2p) for more information.
+
+### About gx
+
+Before adopting gomod, libp2p used [gx](https://github.com/whyrusleeping/gx) to manage dependencies using [IPFS](https://ipfs.io).
+
+Due to the difficulties in keeping both dependency management solutions up-to-date, gx support was ended in April 2019.
+
+Ending gx support does not mean that existing gx builds will break. Because gx references dependencies by their immutable IPFS hash, any currently working gx builds will continue to work for as long as the dependencies are resolvable in IPFS.
+
+However, new changes to go-libp2p will not be published via gx, and users are encouraged to adopt gomod to stay up-to-date.
+
+If you experience any issues migrating from gx to gomod, please [join the discussion at the libp2p forums](https://discuss.libp2p.io/t/gomod-and-go-libp2p/44).
 
 ### Tests
 
-Running of individual tests is done through `gx test <path to test>`
-
-```bash
-$ cd $GOPATH/src/github.com/libp2p/go-libp2p
-$ make deps
-$ gx test ./p2p/<path of module you want to run tests for>
-```
+`go test ./...` will run all tests in the repo. 
 
 ### Packages
 
@@ -139,7 +145,7 @@ List of packages currently in existence for libp2p:
 | **Stream Muxers** |
 | [`go-stream-muxer`](//github.com/libp2p/go-stream-muxer) | [![Travis CI](https://travis-ci.com/libp2p/go-stream-muxer.svg?branch=master)](https://travis-ci.com/libp2p/go-stream-muxer) | [![codecov](https://codecov.io/gh/libp2p/go-stream-muxer/branch/master/graph/badge.svg)](https://codecov.io/gh/libp2p/go-stream-muxer) | interfaces |
 | [`go-smux-yamux`](//github.com/whyrusleeping/go-smux-yamux) | [![Travis CI](https://travis-ci.com/whyrusleeping/go-smux-yamux.svg?branch=master)](https://travis-ci.com/whyrusleeping/go-smux-yamux) | [![codecov](https://codecov.io/gh/whyrusleeping/go-smux-yamux/branch/master/graph/badge.svg)](https://codecov.io/gh/whyrusleeping/go-smux-yamux) | YAMUX stream multiplexer |
-| [`go-smux-mplex`](//github.com/whyrusleeping/go-smux-mplex) | [![Travis CI](https://travis-ci.com/whyrusleeping/go-smux-mplex.svg?branch=master)](https://travis-ci.com/whyrusleeping/go-smux-mplex) | [![codecov](https://codecov.io/gh/whyrusleeping/go-smux-mplex/branch/master/graph/badge.svg)](https://codecov.io/gh/whyrusleeping/go-smux-mplex) | MPLEX stream multiplexer |
+| [`go-smux-multiplex`](//github.com/whyrusleeping/go-smux-multiplex) | [![Travis CI](https://travis-ci.com/whyrusleeping/go-smux-multiplex.svg?branch=master)](https://travis-ci.com/whyrusleeping/go-smux-multiplex) | [![codecov](https://codecov.io/gh/whyrusleeping/go-smux-multiplex/branch/master/graph/badge.svg)](https://codecov.io/gh/whyrusleeping/go-smux-multiplex) | MPLEX stream multiplexer |
 | **NAT Traversal** |
 | [`go-libp2p-nat`](//github.com/libp2p/go-libp2p-nat) | [![Travis CI](https://travis-ci.com/libp2p/go-libp2p-nat.svg?branch=master)](https://travis-ci.com/libp2p/go-libp2p-nat) | [![codecov](https://codecov.io/gh/libp2p/go-libp2p-nat/branch/master/graph/badge.svg)](https://codecov.io/gh/libp2p/go-libp2p-nat) |  |
 | **Peerstore** |
@@ -191,7 +197,7 @@ Guidelines:
 
 - read the [libp2p spec](https://github.com/libp2p/specs)
 - please make branches + pull-request, even if working on the main repository
-- ask questions or talk about things in [Issues](https://github.com/libp2p/go-libp2p/issues) or #ipfs on freenode.
+- ask questions or talk about things in [Issues](https://github.com/libp2p/go-libp2p/issues), our [discussion forums](https://discuss.libp2p.io), or #libp2p or #ipfs on freenode.
 - ensure you are able to contribute (no legal issues please-- we use the DCO)
 - run `go fmt` before pushing any code
 - run `golint` and `go vet` too -- some things (like protobuf files) are expected to fail.
@@ -202,3 +208,7 @@ There's a few things you can do right now to help out:
  - Go through the modules below and **check out existing issues**. This would be especially useful for modules in active development. Some knowledge of IPFS/libp2p may be required, as well as the infrasture behind it - for instance, you may need to read up on p2p and more complex operations like muxing to be able to help technically.
  - **Perform code reviews**.
  - **Add tests**. There can never be enough tests.
+
+---
+
+The last gx published version of this module was: 6.0.41: QmTRN7hRxvGkxKxDdeudty7sRet4L7ZKZCqKsXHa79wmAc
