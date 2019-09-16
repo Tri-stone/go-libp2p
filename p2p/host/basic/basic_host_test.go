@@ -4,23 +4,33 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"reflect"
 	"sort"
 	"testing"
 	"time"
 
-	testutil "github.com/libp2p/go-testutil"
+	"github.com/libp2p/go-eventbus"
+	"github.com/libp2p/go-libp2p-core/event"
+	"github.com/libp2p/go-libp2p-core/helpers"
+	"github.com/libp2p/go-libp2p-core/host"
+	"github.com/libp2p/go-libp2p-core/network"
+	"github.com/libp2p/go-libp2p-core/peer"
+	"github.com/libp2p/go-libp2p-core/protocol"
+	"github.com/libp2p/go-libp2p-core/test"
 
-	host "github.com/libp2p/go-libp2p-host"
-	inet "github.com/libp2p/go-libp2p-net"
-	pstore "github.com/libp2p/go-libp2p-peerstore"
-	protocol "github.com/libp2p/go-libp2p-protocol"
 	swarmt "github.com/libp2p/go-libp2p-swarm/testing"
 	ma "github.com/multiformats/go-multiaddr"
 	madns "github.com/multiformats/go-multiaddr-dns"
 )
 
-func TestHostSimple(t *testing.T) {
+func TestHostDoubleClose(t *testing.T) {
+	ctx := context.Background()
+	h1 := New(swarmt.GenSwarm(t, ctx))
+	h1.Close()
+	h1.Close()
+}
 
+func TestHostSimple(t *testing.T) {
 	ctx := context.Background()
 	h1 := New(swarmt.GenSwarm(t, ctx))
 	h2 := New(swarmt.GenSwarm(t, ctx))
@@ -33,7 +43,7 @@ func TestHostSimple(t *testing.T) {
 	}
 
 	piper, pipew := io.Pipe()
-	h2.SetStreamHandler(protocol.TestingID, func(s inet.Stream) {
+	h2.SetStreamHandler(protocol.TestingID, func(s network.Stream) {
 		defer s.Close()
 		w := io.MultiWriter(s, pipew)
 		io.Copy(w, s) // mirror everything
@@ -69,6 +79,43 @@ func TestHostSimple(t *testing.T) {
 	}
 }
 
+func TestProtocolHandlerEvents(t *testing.T) {
+	ctx := context.Background()
+	h := New(swarmt.GenSwarm(t, ctx))
+	defer h.Close()
+
+	sub, err := h.EventBus().Subscribe(&event.EvtLocalProtocolsUpdated{}, eventbus.BufSize(16))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Close()
+
+	assert := func(added, removed []protocol.ID) {
+		var next event.EvtLocalProtocolsUpdated
+		select {
+		case evt := <-sub.Out():
+			next = evt.(event.EvtLocalProtocolsUpdated)
+			break
+		case <-time.After(5 * time.Second):
+			t.Fatal("event not received in 5 seconds")
+		}
+
+		if !reflect.DeepEqual(added, next.Added) {
+			t.Errorf("expected added: %v; received: %v", added, next.Added)
+		}
+		if !reflect.DeepEqual(removed, next.Removed) {
+			t.Errorf("expected removed: %v; received: %v", removed, next.Removed)
+		}
+	}
+
+	h.SetStreamHandler(protocol.TestingID, func(s network.Stream) {})
+	assert([]protocol.ID{protocol.TestingID}, nil)
+	h.SetStreamHandler(protocol.ID("foo"), func(s network.Stream) {})
+	assert([]protocol.ID{protocol.ID("foo")}, nil)
+	h.RemoveStreamHandler(protocol.TestingID)
+	assert(nil, []protocol.ID{protocol.TestingID})
+}
+
 func TestHostAddrsFactory(t *testing.T) {
 	maddr := ma.StringCast("/ip4/1.2.3.4/tcp/1234")
 	addrsFactory := func(addrs []ma.Multiaddr) []ma.Multiaddr {
@@ -89,6 +136,8 @@ func TestHostAddrsFactory(t *testing.T) {
 }
 
 func getHostPair(ctx context.Context, t *testing.T) (host.Host, host.Host) {
+	t.Helper()
+
 	h1 := New(swarmt.GenSwarm(t, ctx))
 	h2 := New(swarmt.GenSwarm(t, ctx))
 
@@ -101,6 +150,7 @@ func getHostPair(ctx context.Context, t *testing.T) (host.Host, host.Host) {
 }
 
 func assertWait(t *testing.T, c chan protocol.ID, exp protocol.ID) {
+	t.Helper()
 	select {
 	case proto := <-c:
 		if proto != exp {
@@ -125,7 +175,7 @@ func TestHostProtoPreference(t *testing.T) {
 
 	connectedOn := make(chan protocol.ID)
 
-	handler := func(s inet.Stream) {
+	handler := func(s network.Stream) {
 		connectedOn <- s.Protocol()
 		s.Close()
 	}
@@ -140,7 +190,7 @@ func TestHostProtoPreference(t *testing.T) {
 	assertWait(t, connectedOn, protoOld)
 	s.Close()
 
-	mfunc, err := host.MultistreamSemverMatcher(protoMinor)
+	mfunc, err := helpers.MultistreamSemverMatcher(protoMinor)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,11 +209,19 @@ func TestHostProtoPreference(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// XXX: This is racy now that we push protocol updates. If this tests
+	// fails, try allowing both protoOld and protoMinor.
 	assertWait(t, connectedOn, protoOld)
 
 	s2.Close()
 
 	s3, err := h2.NewStream(ctx, h1.ID(), protoMinor)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Force a lazy handshake as we may have received a protocol update by this point.
+	_, err = s3.Write([]byte("hello"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +238,7 @@ func TestHostProtoMismatch(t *testing.T) {
 	defer h1.Close()
 	defer h2.Close()
 
-	h1.SetStreamHandler("/super", func(s inet.Stream) {
+	h1.SetStreamHandler("/super", func(s network.Stream) {
 		t.Error("shouldnt get here")
 		s.Reset()
 	})
@@ -199,7 +257,7 @@ func TestHostProtoPreknowledge(t *testing.T) {
 	h2 := New(swarmt.GenSwarm(t, ctx))
 
 	conn := make(chan protocol.ID)
-	handler := func(s inet.Stream) {
+	handler := func(s network.Stream) {
 		conn <- s.Protocol()
 		s.Close()
 	}
@@ -258,7 +316,7 @@ func TestNewDialOld(t *testing.T) {
 	defer h2.Close()
 
 	connectedOn := make(chan protocol.ID)
-	h1.SetStreamHandler("/testing", func(s inet.Stream) {
+	h1.SetStreamHandler("/testing", func(s network.Stream) {
 		connectedOn <- s.Protocol()
 		s.Close()
 	})
@@ -286,7 +344,7 @@ func TestProtoDowngrade(t *testing.T) {
 	defer h2.Close()
 
 	connectedOn := make(chan protocol.ID)
-	h1.SetStreamHandler("/testing/1.0.0", func(s inet.Stream) {
+	h1.SetStreamHandler("/testing/1.0.0", func(s network.Stream) {
 		connectedOn <- s.Protocol()
 		s.Close()
 	})
@@ -305,9 +363,9 @@ func TestProtoDowngrade(t *testing.T) {
 
 	h1.Network().ConnsToPeer(h2.ID())[0].Close()
 
-	time.Sleep(time.Millisecond * 50) // allow notifications to propogate
+	time.Sleep(time.Millisecond * 50) // allow notifications to propagate
 	h1.RemoveStreamHandler("/testing/1.0.0")
-	h1.SetStreamHandler("/testing", func(s inet.Stream) {
+	h1.SetStreamHandler("/testing", func(s network.Stream) {
 		connectedOn <- s.Protocol()
 		s.Close()
 	})
@@ -339,11 +397,11 @@ func TestProtoDowngrade(t *testing.T) {
 func TestAddrResolution(t *testing.T) {
 	ctx := context.Background()
 
-	p1, err := testutil.RandPeerID()
+	p1, err := test.RandPeerID()
 	if err != nil {
 		t.Error(err)
 	}
-	p2, err := testutil.RandPeerID()
+	p2, err := test.RandPeerID()
 	if err != nil {
 		t.Error(err)
 	}
@@ -363,7 +421,7 @@ func TestAddrResolution(t *testing.T) {
 	h := New(swarmt.GenSwarm(t, ctx), resolver)
 	defer h.Close()
 
-	pi, err := pstore.InfoFromP2pAddr(p2paddr1)
+	pi, err := peer.AddrInfoFromP2pAddr(p2paddr1)
 	if err != nil {
 		t.Error(err)
 	}

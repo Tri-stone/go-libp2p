@@ -11,10 +11,10 @@ import (
 
 	u "github.com/ipfs/go-ipfs-util"
 	logging "github.com/ipfs/go-log"
-	host "github.com/libp2p/go-libp2p-host"
-	inet "github.com/libp2p/go-libp2p-net"
-	peer "github.com/libp2p/go-libp2p-peer"
-	protocol "github.com/libp2p/go-libp2p-protocol"
+	"github.com/libp2p/go-libp2p-core/host"
+	"github.com/libp2p/go-libp2p-core/network"
+	"github.com/libp2p/go-libp2p-core/peer"
+	protocol "github.com/libp2p/go-libp2p-core/protocol"
 	swarmt "github.com/libp2p/go-libp2p-swarm/testing"
 )
 
@@ -59,7 +59,7 @@ a problem.
 	senderDone := make(chan struct{})
 
 	// the receiver handles requests with some rate limiting
-	receiver := func(s inet.Stream) {
+	receiver := func(s network.Stream) {
 		log.Debug("receiver received a stream")
 
 		<-receiverRatelimit // acquire
@@ -76,7 +76,7 @@ a problem.
 
 	// the sender opens streams as fast as possible
 	sender := func(host host.Host, remote peer.ID) {
-		var s inet.Stream
+		var s network.Stream
 		var err error
 		defer func() {
 			t.Error(err)
@@ -211,13 +211,14 @@ func TestStBackpressureStreamWrite(t *testing.T) {
 	// writeStats lets us listen to all the writes and return
 	// how many happened and how much was written
 	writeStats := func() (int, int) {
+		t.Helper()
 		writes := 0
 		bytes := 0
 		for {
 			select {
 			case n := <-senderWrote:
 				writes++
-				bytes = bytes + n
+				bytes += n
 			default:
 				log.Debugf("stats: sender wrote %d bytes, %d writes", bytes, writes)
 				return bytes, writes
@@ -229,7 +230,7 @@ func TestStBackpressureStreamWrite(t *testing.T) {
 	// completion of every write. This makes it possible to see how
 	// fast it's actually writing. We pair this with a receiver
 	// that waits for a signal to read.
-	sender := func(s inet.Stream) {
+	sender := func(s network.Stream) {
 		defer func() {
 			s.Close()
 			senderDone <- struct{}{}
@@ -252,13 +253,18 @@ func TestStBackpressureStreamWrite(t *testing.T) {
 			}
 
 			log.Debugf("sender wrote %d bytes", n)
-			senderWrote <- n
+			select {
+			case senderWrote <- n:
+			default:
+				t.Error("sender wrote channel full")
+			}
 		}
 	}
 
 	// receive a number of bytes from a stream.
 	// returns the number of bytes written.
-	receive := func(s inet.Stream, expect int) {
+	receive := func(s network.Stream, expect int) {
+		t.Helper()
 		log.Debugf("receiver to read %d bytes", expect)
 		rbuf := make([]byte, expect)
 		n, err := io.ReadFull(s, rbuf)
@@ -294,6 +300,7 @@ func TestStBackpressureStreamWrite(t *testing.T) {
 
 	// let's make sure r/w works.
 	testSenderWrote := func(bytesE int) {
+		t.Helper()
 		bytesA, writesA := writeStats()
 		if bytesA != bytesE {
 			t.Errorf("numbers failed: %d =?= %d bytes, via %d writes", bytesA, bytesE, writesA)
@@ -311,18 +318,19 @@ func TestStBackpressureStreamWrite(t *testing.T) {
 	roundsTotal := 0
 	for roundsTotal < (2 << 20) {
 		// let the sender fill its buffers, it will stop sending.
-		<-time.After(300 * time.Millisecond)
+		<-time.After(time.Second)
 		b, _ := writeStats()
 		testSenderWrote(0)
+		<-time.After(100 * time.Millisecond)
 		testSenderWrote(0)
 
 		// drain it all, wait again
 		receive(s, b)
-		roundsTotal = roundsTotal + b
+		roundsTotal += b
 	}
 	roundsTime := time.Since(roundsStart)
 
-	// now read continously, while we measure stats.
+	// now read continuously, while we measure stats.
 	stop := make(chan struct{})
 	contStart := time.Now()
 
@@ -357,9 +365,10 @@ func TestStBackpressureStreamWrite(t *testing.T) {
 	// and a couple rounds more for good measure ;)
 	for i := 0; i < 3; i++ {
 		// let the sender fill its buffers, it will stop sending.
-		<-time.After(300 * time.Millisecond)
+		<-time.After(time.Second)
 		b, _ := writeStats()
 		testSenderWrote(0)
+		<-time.After(100 * time.Millisecond)
 		testSenderWrote(0)
 
 		// drain it all, wait again
